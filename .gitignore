@@ -1,0 +1,14 @@
+# API 키 — 절대 GitHub에 올리면 안 되는 파일들
+.streamlit/secrets.toml
+saved_keys.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+.venv
+venv/
+
+# macOS
+.DS_Store

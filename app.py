@@ -1,7 +1,9 @@
 import streamlit as st
 import os
 import json
+import re
 import urllib.parse
+from typing import Optional, List
 from analyzer import analyze_text, chat_title_thumbnail
 from searcher import NaverSearcher, search_all_news, search_youtube_trends
 
@@ -95,7 +97,7 @@ if not anthropic_key:
     st.warning("왼쪽 사이드바에서 Claude API 키를 먼저 입력해주세요.")
     st.stop()
 
-main_tab1, main_tab2 = st.tabs(["🔍 이미지 & 뉴스 검색", "🖼️ 제목 & 썸네일"])
+main_tab1, main_tab2, main_tab3 = st.tabs(["🔍 이미지 & 뉴스 검색", "🖼️ 제목 & 썸네일", "📊 유튜브 벤치마킹"])
 
 # ════════════════════════════════════════════════════
 # 탭 1 — 이미지 & 뉴스 검색
@@ -335,3 +337,177 @@ with main_tab2:
         st.session_state['tt_chat'].append({'role': 'user', 'content': prompt})
         st.session_state['tt_thinking'] = True
         st.rerun()
+
+# ════════════════════════════════════════════════════
+# 탭 3 — 유튜브 벤치마킹
+# ════════════════════════════════════════════════════
+def _extract_video_id(url: str) -> Optional[str]:
+    patterns = [
+        r"(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/)([a-zA-Z0-9_-]{11})",
+        r"youtube\.com/shorts/([a-zA-Z0-9_-]{11})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+def _get_transcript(video_id: str, url: str) -> dict:
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
+    except ImportError:
+        return {"url": url, "transcript": None, "language": None, "error": "youtube-transcript-api 미설치"}
+
+    result = {"url": url, "transcript": None, "language": None, "error": None}
+    lang_priority = ["ko", "en", "en-US", "en-GB"]
+    try:
+        tlist = YouTubeTranscriptApi.list_transcripts(video_id)
+        for lang in lang_priority:
+            try:
+                t = tlist.find_manually_created_transcript([lang])
+                result["transcript"] = " ".join(x["text"] for x in t.fetch())
+                result["language"] = lang + " (수동)"
+                return result
+            except Exception:
+                continue
+        for lang in lang_priority:
+            try:
+                t = tlist.find_generated_transcript([lang])
+                result["transcript"] = " ".join(x["text"] for x in t.fetch())
+                result["language"] = lang + " (자동생성)"
+                return result
+            except Exception:
+                continue
+        try:
+            t = next(iter(tlist))
+            result["transcript"] = " ".join(x["text"] for x in t.fetch())
+            result["language"] = t.language_code
+            return result
+        except StopIteration:
+            pass
+        result["error"] = "사용 가능한 자막 없음"
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+with main_tab3:
+    st.caption("유튜브 링크를 넣으면 자막을 분석해서 공통 패턴과 마케팅 인사이트를 뽑아드려요")
+
+    bench_focus = st.text_input(
+        "분석 포커스 (선택)",
+        placeholder="예: 훅 전략, 세일즈 기법, CTA 패턴  — 비워두면 전체 분석",
+        key="bench_focus"
+    )
+    bench_urls_raw = st.text_area(
+        "유튜브 링크 (한 줄에 하나씩, 최대 10개)",
+        placeholder="https://youtu.be/abc123\nhttps://youtu.be/def456\nhttps://youtu.be/ghi789",
+        height=200,
+        key="bench_urls",
+        label_visibility="collapsed"
+    )
+
+    if st.button("🚀 벤치마킹 분석 시작", type="primary", use_container_width=True, key="bench_run"):
+        urls = [u.strip() for u in bench_urls_raw.strip().splitlines() if u.strip()]
+        if not urls:
+            st.error("링크를 한 줄에 하나씩 입력해주세요.")
+            st.stop()
+        if len(urls) > 10:
+            st.warning("처음 10개만 분석할게요.")
+            urls = urls[:10]
+
+        # 자막 추출
+        st.markdown("---")
+        st.markdown("**📥 자막 추출 중...**")
+        transcripts = []
+        prog = st.progress(0)
+        for i, url in enumerate(urls):
+            vid = _extract_video_id(url)
+            if not vid:
+                st.warning(f"❌ 유효하지 않은 링크: `{url}`")
+                transcripts.append({"url": url, "transcript": None, "language": None, "error": "유효하지 않은 URL"})
+            else:
+                with st.spinner(f"[{i+1}/{len(urls)}] 자막 추출 중..."):
+                    res = _get_transcript(vid, url)
+                if res["transcript"]:
+                    st.success(f"✅ `{url}` — {res['language']}, {len(res['transcript']):,}자")
+                else:
+                    st.warning(f"❌ `{url}` — {res['error']}")
+                transcripts.append(res)
+            prog.progress((i + 1) / len(urls))
+
+        successful = [t for t in transcripts if t["transcript"]]
+        if not successful:
+            st.error("자막을 가져올 수 있는 영상이 없어요. 자막이 켜진 영상인지 확인해주세요.")
+            st.stop()
+
+        # Claude 분석
+        st.markdown("---")
+        st.markdown("**🤖 Claude 분석 중...**")
+
+        sections = []
+        for i, t in enumerate(transcripts, 1):
+            if t["transcript"]:
+                text = t["transcript"][:8000] + ("... [이하 생략]" if len(t["transcript"]) > 8000 else "")
+                sections.append(f"[영상 {i}] URL: {t['url']}\n언어: {t['language']}\n자막:\n{text}")
+            else:
+                sections.append(f"[영상 {i}] URL: {t['url']}\n⚠️ 자막 추출 실패: {t['error']}")
+
+        focus_line = f"\n\n분석 포커스: {bench_focus}" if bench_focus else ""
+        prompt_text = f"""다음은 유튜브 영상들의 자막 데이터입니다. 마케터 관점에서 심층 벤치마킹 분석을 해주세요.{focus_line}
+
+{chr(10).join(sections)}
+
+---
+
+위 영상들을 분석해서 다음 항목으로 정리해주세요:
+
+## 1. 영상별 핵심 요약
+각 영상의 주제와 핵심 메시지를 2-3줄로 요약해주세요.
+
+## 2. 공통 패턴 & 구조
+- 공통적으로 사용하는 콘텐츠 구조/흐름
+- 반복되는 키워드나 메시지 프레임
+- 공통 스토리텔링 방식
+
+## 3. 훅(Hook) & 도입부 전략
+영상 초반에 시청자를 끌어당기는 방식의 공통점과 차이점
+
+## 4. 핵심 마케팅 인사이트
+- 이 카테고리에서 효과적으로 작동하는 요소
+- 타겟 고객의 페인포인트를 다루는 방식
+- CTA(행동 유도) 패턴
+
+## 5. 우리가 적용할 수 있는 액션 아이템
+채널톡/SaaS B2B 마케팅 관점에서 벤치마킹할 수 있는 구체적인 적용 방안 3-5가지
+
+분석은 구체적이고 실무에 바로 쓸 수 있게 작성해주세요."""
+
+        import anthropic as _anthropic
+        client = _anthropic.Anthropic(api_key=anthropic_key)
+        result_box = st.empty()
+        full_text = ""
+        with client.messages.stream(
+            model="claude-opus-4-6",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt_text}],
+        ) as stream:
+            for chunk in stream.text_stream:
+                full_text += chunk
+                result_box.markdown(full_text + "▌")
+        result_box.markdown(full_text)
+
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        header = (
+            f"# YouTube 벤치마킹 분석 리포트\n"
+            f"생성일시: {datetime.now().strftime('%Y년 %m월 %d일 %H:%M')}\n\n"
+            f"## 분석 대상\n" + "\n".join(f"- {u}" for u in urls) + "\n\n---\n\n"
+        )
+        st.download_button(
+            label="📄 리포트 다운로드 (.md)",
+            data=(header + full_text).encode("utf-8"),
+            file_name=f"youtube_bench_{timestamp}.md",
+            mime="text/markdown",
+            use_container_width=True,
+            key="bench_download"
+        )

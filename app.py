@@ -359,32 +359,43 @@ def _get_transcript(video_id: str, url: str) -> dict:
         return {"url": url, "transcript": None, "language": None, "error": "youtube-transcript-api 미설치"}
 
     result = {"url": url, "transcript": None, "language": None, "error": None}
-    lang_priority = ["ko", "en", "en-US", "en-GB"]
+    api = YouTubeTranscriptApi()
+
+    def _join(fetched):
+        return " ".join(x.text if hasattr(x, "text") else x.get("text", "") for x in fetched)
+
     try:
-        tlist = YouTubeTranscriptApi.list_transcripts(video_id)
-        for lang in lang_priority:
+        tlist = api.list(video_id)
+
+        # 1순위: 수동 자막 (ko → en)
+        for lang in ["ko", "en", "en-US", "en-GB"]:
             try:
                 t = tlist.find_manually_created_transcript([lang])
-                result["transcript"] = " ".join(getattr(x, "text", x.get("text", "") if isinstance(x, dict) else "") for x in t.fetch())
+                result["transcript"] = _join(t.fetch())
                 result["language"] = lang + " (수동)"
                 return result
             except Exception:
                 continue
-        for lang in lang_priority:
+
+        # 2순위: 자동생성 자막 (ko → en)
+        for lang in ["ko", "en", "en-US", "en-GB"]:
             try:
                 t = tlist.find_generated_transcript([lang])
-                result["transcript"] = " ".join(getattr(x, "text", x.get("text", "") if isinstance(x, dict) else "") for x in t.fetch())
+                result["transcript"] = _join(t.fetch())
                 result["language"] = lang + " (자동생성)"
                 return result
             except Exception:
                 continue
-        try:
-            t = next(iter(tlist))
-            result["transcript"] = " ".join(getattr(x, "text", x.get("text", "") if isinstance(x, dict) else "") for x in t.fetch())
-            result["language"] = t.language_code
-            return result
-        except StopIteration:
-            pass
+
+        # 3순위: 아무 자막이나
+        for t in tlist:
+            try:
+                result["transcript"] = _join(t.fetch())
+                result["language"] = t.language_code
+                return result
+            except Exception:
+                continue
+
         result["error"] = "사용 가능한 자막 없음"
     except Exception as e:
         result["error"] = str(e)

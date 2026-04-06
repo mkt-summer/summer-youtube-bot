@@ -365,7 +365,7 @@ def _get_transcript(video_id: str, url: str) -> dict:
         for lang in lang_priority:
             try:
                 t = tlist.find_manually_created_transcript([lang])
-                result["transcript"] = " ".join(x["text"] for x in t.fetch())
+                result["transcript"] = " ".join(getattr(x, "text", x.get("text", "") if isinstance(x, dict) else "") for x in t.fetch())
                 result["language"] = lang + " (수동)"
                 return result
             except Exception:
@@ -373,14 +373,14 @@ def _get_transcript(video_id: str, url: str) -> dict:
         for lang in lang_priority:
             try:
                 t = tlist.find_generated_transcript([lang])
-                result["transcript"] = " ".join(x["text"] for x in t.fetch())
+                result["transcript"] = " ".join(getattr(x, "text", x.get("text", "") if isinstance(x, dict) else "") for x in t.fetch())
                 result["language"] = lang + " (자동생성)"
                 return result
             except Exception:
                 continue
         try:
             t = next(iter(tlist))
-            result["transcript"] = " ".join(x["text"] for x in t.fetch())
+            result["transcript"] = " ".join(getattr(x, "text", x.get("text", "") if isinstance(x, dict) else "") for x in t.fetch())
             result["language"] = t.language_code
             return result
         except StopIteration:
